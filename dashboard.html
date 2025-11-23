@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rekap Kurs Harian</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <h2>📊 Dashboard Rekap Kurs Harian</h2>
+    <p>Data historis (Maks. 1 Minggu)</p>
+
+    <div id="grid-container">
+        <div class="loading">Menghubungkan ke database...</div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const container = document.getElementById('grid-container');
+
+        // Mapping Bendera
+        const flags = { 'USD': '🇺🇸', 'CNY': '🇨🇳', 'JPY': '🇯🇵', 'SGD': '🇸🇬', 'MYR': '🇲🇾', 'SAR': '🇸🇦' };
+
+        // Mendengarkan event 'update_view' dari server
+        socket.on('update_view', (historyData) => {
+            container.innerHTML = '';
+
+            if (historyData.length === 0) {
+                container.innerHTML = '<p class="loading">Belum ada data tersimpan. Server baru dimulai.</p>';
+                return;
+            }
+
+            // Loop setiap hari (item) dalam array
+            historyData.forEach((dayData, index) => {
+                
+                // Cek apakah ini data paling baru (paling kanan di array)
+                const isLatest = index === historyData.length - 1;
+                const classLatest = isLatest ? 'latest' : '';
+                const badgeText = isLatest ? 'HARI INI' : 'ARSIP';
+
+                // Membuat Container Kartu
+                const card = document.createElement('div');
+                card.className = `day-card ${classLatest}`;
+
+                // Membuat HTML Header
+                let headerHtml = `
+                    <div class="card-header">
+                        <span class="date-text">${dayData.displayDate}</span>
+                        <span class="badge">${badgeText}</span>
+                    </div>
+                `;
+
+                // Membuat HTML List Harga
+                let listHtml = '<div class="rate-list">';
+                
+                for (const [kode, harga] of Object.entries(dayData.rates)) {
+                    const flag = flags[kode] || '🌐';
+                    const hargaFmt = new Intl.NumberFormat('id-ID').format(harga);
+                    
+                    listHtml += `
+                        <div class="rate-row">
+                            <div class="currency-info">
+                                <span class="flag">${flag}</span>
+                                <span class="code">${kode}</span>
+                            </div>
+                            <span class="price">Rp ${hargaFmt}</span>
+                        </div>
+                    `;
+                }
+                listHtml += '</div>';
+
+                card.innerHTML = headerHtml + listHtml;
+                container.appendChild(card);
+            });
+        });
+    </script>
+</body>
+</html>
