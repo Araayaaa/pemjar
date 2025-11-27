@@ -2,13 +2,13 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const axios = require('axios');
-const fs = require('fs'); // Library untuk baca/tulis file (Bawaan Node.js)
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
-//Mengizinkan browser mengambil file css di folder ini
+// Mengizinkan browser mengambil file css/html di folder ini
 app.use(express.static(__dirname));
 
 app.get('/', (req, res) => {
@@ -16,89 +16,113 @@ app.get('/', (req, res) => {
 });
 
 const DB_FILE = 'data_kurs.json';
-const MATA_UANG = ['USD', 'CNY', 'JPY', 'SGD', 'MYR'];
+const MATA_UANG = ['USD', 'CNY', 'JPY', 'SGD', 'MYR', 'SAR']; // Tambahkan SAR sesuai dashboard
+// Interval pengecekan (Contoh: 300000 ms = 5 menit)
+const CHECK_INTERVAL = 5 * 60 * 1000; 
 
 // --- FUNGSI DATABASE JSON ---
 
-// 1. Baca Database
 function readDB() {
     if (!fs.existsSync(DB_FILE)) {
-        return []; // Jika file belum ada, kembalikan array kosong
+        return [];
     }
     const rawData = fs.readFileSync(DB_FILE);
     return JSON.parse(rawData);
 }
 
-// 2. Simpan/Tulis Database
 function saveDB(data) {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
-// --- LOGIKA UTAMA ---
-async function updateDailyData() {
-    // 1. Ambil tanggal hari ini (Format: YYYY-MM-DD)
-    const todayDate = new Date().toISOString().split('T')[0];
-    
-    // 2. Baca data lama
-    let history = readDB();
+// --- LOGIKA UTAMA (PEMBARUAN OTOMATIS) ---
+async function fetchAndProcessData() {
+    try {
+        console.log(`🔄 Mengecek pembaruan data ke API...`);
+        
+        // 1. Ambil Real Data dari API
+        const response = await axios.get('https://api.exchangerate-api.com/v4/latest/IDR');
+        const apiRates = response.data.rates;
+        const lastUpdateUnix = response.data.time_last_updated; // Waktu update dari API
 
-    // 3. Cek apakah data hari ini sudah ada?
-    const isTodayExists = history.find(item => item.date === todayDate);
-
-    if (!isTodayExists) {
-        console.log(`📅 Hari baru (${todayDate}) terdeteksi. Mengambil data API...`);
-        try {
-            // Ambil Real Data dari API Exchange Rate
-            const response = await axios.get('https://api.exchangerate-api.com/v4/latest/IDR');
-            const rates = response.data.rates;
-
-            // Format data mata uang
-            let dailyRates = {};
-            MATA_UANG.forEach(kode => {
-                dailyRates[kode] = 1 / rates[kode]; // Balik kurs jadi IDR
-            });
-
-            // Masukkan ke array
-            const newData = {
-                date: todayDate,
-                displayDate: new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'short' }),
-                rates: dailyRates
-            };
-
-            history.push(newData);
-
-            // ATURAN: Jika lebih dari 1 minggu, hapus yang paling lama
-            if (history.length > 7) {
-                history.shift(); // Hapus elemen pertama (paling kiri/lama)
+        // 2. Format data mata uang (1 Asing = Berapa IDR)
+        let newRates = {};
+        MATA_UANG.forEach(kode => {
+            // Jika mata uang ada di API, hitung kebalikan kurs (karena base IDR)
+            if(apiRates[kode]) {
+                newRates[kode] = 1 / apiRates[kode]; 
             }
+        });
 
-            // Simpan ke file
-            saveDB(history);
-            console.log("✅ Data tersimpan ke data_kurs.json");
+        // 3. Siapkan Struktur Data Baru
+        const todayDate = new Date().toISOString().split('T')[0];
+        const newData = {
+            date: todayDate,
+            last_update_api: lastUpdateUnix, // Opsional: untuk debug
+            displayDate: new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'short' }),
+            rates: newRates
+        };
 
-        } catch (error) {
-            console.error("Gagal update data:", error.message);
+        // 4. Baca Database Lama
+        let history = readDB();
+        
+        // Cari index data hari ini
+        const todayIndex = history.findIndex(item => item.date === todayDate);
+
+        let dataChanged = false;
+
+        if (todayIndex !== -1) {
+            // --- SKENARIO A: Data hari ini SUDAH ada ---
+            // Kita cek apakah harganya berbeda dengan yang tersimpan?
+            const currentSavedRates = JSON.stringify(history[todayIndex].rates);
+            const newRatesString = JSON.stringify(newRates);
+
+            if (currentSavedRates !== newRatesString) {
+                console.log("⚡ Ada perubahan harga dari API! Mengupdate database...");
+                history[todayIndex] = newData; // Timpa data hari ini dengan yang baru
+                dataChanged = true;
+            } else {
+                console.log("💤 Harga stabil (tidak ada perubahan dari pengecekan sebelumnya).");
+            }
+        } else {
+            // --- SKENARIO B: Hari baru (belum ada data hari ini) ---
+            console.log("📅 Hari baru terdeteksi. Menambahkan entry baru.");
+            history.push(newData);
+            
+            // Hapus data terlama jika lebih dari 7 hari
+            if (history.length > 7) {
+                history.shift(); 
+            }
+            dataChanged = true;
         }
-    } else {
-        console.log("ℹ️ Data hari ini sudah ada di database. Tidak perlu request API.");
-    }
 
-    return history;
+        // 5. Jika ada perubahan, Simpan ke File & Broadcast ke Client
+        if (dataChanged) {
+            saveDB(history);
+            io.emit('update_view', history); // Kirim ke semua browser yang sedang buka
+            console.log("✅ Database diperbarui & Client dinotifikasi.");
+        }
+
+    } catch (error) {
+        console.error("❌ Gagal mengambil data:", error.message);
+    }
 }
 
 // --- JALANKAN SERVER ---
+
 io.on('connection', (socket) => {
-    console.log('User terhubung');
-    // Kirim data yang ada di database saat ini
+    console.log('👤 User terhubung');
+    // Kirim data terakhir saat user baru buka
     const data = readDB();
     socket.emit('update_view', data);
 });
 
-// Jalankan sekali saat server start
-updateDailyData().then(() => {
-    console.log('Server siap dengan data terbaru.');
-});
+// 1. Jalankan pengecekan pertama kali saat server start
+fetchAndProcessData();
+
+// 2. Jalankan pengecekan berulang (Interval)
+setInterval(fetchAndProcessData, CHECK_INTERVAL);
 
 server.listen(3000, () => {
-    console.log('Server berjalan di http://localhost:3000');
+    console.log(`🚀 Server berjalan di http://localhost:3000`);
+    console.log(`⏱️  Pengecekan API otomatis setiap ${CHECK_INTERVAL/1000} detik.`);
 });
