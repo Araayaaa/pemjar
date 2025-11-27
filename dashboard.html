@@ -1,12 +1,16 @@
 <!DOCTYPE html>
 <html lang="id">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rekap Kurs Harian</title>
-    
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Roboto+Mono:wght@500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 
@@ -14,40 +18,110 @@
     <h2>📊 Dashboard Rekap Kurs Harian</h2>
     <p>Data historis (Maks. 1 Minggu)</p>
 
-    <div id="grid-container">
+    <div class="controls">
+        <button class="btn-toggle active" onclick="switchView('cards')">📁 Tampilan Kartu</button>
+        <button class="btn-toggle" onclick="switchView('chart')">📈 Tampilan Chart</button>
+    </div>
+
+    <div id="view-cards" class="active"
+        style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px;">
         <div class="loading">Menghubungkan ke database...</div>
+    </div>
+
+    <div id="view-chart">
+        <canvas id="chartKurs"></canvas>
+    </div>
+
+    <div class="konversi-section">
+        <h3>🧮 Kalkulator Konversi</h3>
+        <div class="konversi-grid">
+            <div class="form-group">
+                <label>Jumlah Nominal</label>
+                <input type="number" id="jumlah" placeholder="1" value="1">
+            </div>
+            <div class="form-group">
+                <label>Dari Mata Uang</label>
+                <select id="mataUangAsal">
+                    <option value="IDR">IDR (Rupiah)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>ke Mata Uang</label>
+                <select id="mataUangTujuan"></select>
+            </div>
+            <button class="btn-konversi" onclick="hitungHasil()">
+                Konversi
+            </button>
+        </div>
+        <div id="hasil" class="hasil">Hasil: -</div>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
         const socket = io();
-        const container = document.getElementById('grid-container');
+        const containerCards = document.getElementById('view-cards');
 
-        // Mapping Bendera
-        const flags = { 'USD': '🇺🇸', 'CNY': '🇨🇳', 'JPY': '🇯🇵', 'SGD': '🇸🇬', 'MYR': '🇲🇾', 'SAR': '🇸🇦' };
+        let globalLatestRates = {};
+        let globalHistoryData = [];
+        let myChart = null;
 
-        // Mendengarkan event 'update_view' dari server
+        const metaCurrency= {
+            'USD': { flag: '🇺🇸', color: '#EF4444' },
+            'CNY': { flag: '🇨🇳', color: '#F59E0B' },
+            'JPY': { flag: '🇯🇵', color: '#10B981' },
+            'SGD': { flag: '🇸🇬', color: '#3B82F6' },
+            'MYR': { flag: '🇲🇾', color: '#6366F1' },
+            'SAR': { flag: '🇸🇦', color: '#8B5CF6' }
+        }
+
+        function switchView(viewName) {
+            // Update Tombol
+            document.querySelectorAll('.btn-toggle').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Sembunyikan semua view
+            document.getElementById('view-cards').style.display = 'none';
+            document.getElementById('view-cards').classList.remove('active');
+
+            document.getElementById('view-chart').style.display = 'none';
+            document.getElementById('view-chart').classList.remove('active');
+
+            // Tampilkan yang dipilih
+            if (viewName === 'cards') {
+                document.getElementById('view-cards').style.display = 'grid';
+                document.getElementById('view-cards').classList.add('active');
+            } else {
+                document.getElementById('view-chart').style.display = 'block';
+                document.getElementById('view-chart').classList.add('active');
+                renderChart(); // Render ulang chart saat tab dibuka
+            }
+        }
+
         socket.on('update_view', (historyData) => {
-            container.innerHTML = '';
+            globalHistoryData = historyData; // Simpan ke global
+            containerCards.innerHTML = '';
 
             if (historyData.length === 0) {
-                container.innerHTML = '<p class="loading">Belum ada data tersimpan. Server baru dimulai.</p>';
+                containerCards.innerHTML = '<p class="loading">Belum ada data tersimpan.</p>';
                 return;
             }
 
-            // Loop setiap hari (item) dalam array
+            // 1. Update Data Kartu & Global Rates
             historyData.forEach((dayData, index) => {
-                
-                // Cek apakah ini data paling baru (paling kanan di array)
                 const isLatest = index === historyData.length - 1;
+                
+                // Jika ini data terbaru, simpan rates untuk kalkulator
+                if (isLatest) {
+                    globalLatestRates = dayData.rates;
+                    updateCalculatorOptions();
+                }
+
                 const classLatest = isLatest ? 'latest' : '';
                 const badgeText = isLatest ? 'HARI INI' : 'ARSIP';
 
-                // Membuat Container Kartu
                 const card = document.createElement('div');
                 card.className = `day-card ${classLatest}`;
 
-                // Membuat HTML Header
                 let headerHtml = `
                     <div class="card-header">
                         <span class="date-text">${dayData.displayDate}</span>
@@ -55,17 +129,15 @@
                     </div>
                 `;
 
-                // Membuat HTML List Harga
                 let listHtml = '<div class="rate-list">';
-                
                 for (const [kode, harga] of Object.entries(dayData.rates)) {
-                    const flag = flags[kode] || '🌐';
+                    const info = metaCurrency[kode] || { flag: '🌐', color: '#ccc' };
                     const hargaFmt = new Intl.NumberFormat('id-ID').format(harga);
                     
                     listHtml += `
                         <div class="rate-row">
                             <div class="currency-info">
-                                <span class="flag">${flag}</span>
+                                <span class="flag">${info.flag}</span>
                                 <span class="code">${kode}</span>
                             </div>
                             <span class="price">Rp ${hargaFmt}</span>
@@ -73,11 +145,144 @@
                     `;
                 }
                 listHtml += '</div>';
-
                 card.innerHTML = headerHtml + listHtml;
-                container.appendChild(card);
+                containerCards.appendChild(card);
             });
+
+            // 2. Update Chart jika sedang dibuka
+            if(document.getElementById('view-chart').classList.contains('active')) {
+                renderChart();
+            }
         });
+
+        function renderChart() {
+            if (globalHistoryData.length === 0) return;
+
+            const ctx = document.getElementById('chartKurs').getContext('2d');
+            
+            // Siapkan Label (Tanggal)
+            const labels = globalHistoryData.map(d => d.displayDate);
+
+            // Siapkan Dataset
+            // Ambil semua kode mata uang dari data hari pertama (asumsi konsisten)
+            const currencies = Object.keys(globalHistoryData[0].rates);
+            
+            const datasets = currencies.map(kode => {
+                const info = metaCurrency[kode] || { color: '#999' };
+                return {
+                    label: kode,
+                    data: globalHistoryData.map(d => d.rates[kode]),
+                    borderColor: info.color,
+                    backgroundColor: info.color,
+                    tension: 0.3, // Garis agak melengkung
+                    fill: false
+                };
+            });
+
+            // Hancurkan chart lama jika ada agar tidak menumpuk
+            if (myChart) {
+                myChart.destroy();
+            }
+
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: { position: 'bottom' },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) { label += ': '; }
+                                    if (context.parsed.y !== null) {
+                                        label += new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(context.parsed.y);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateCalculatorOptions() {
+            const selectFrom = document.getElementById('mataUangAsal');
+            const selectTo = document.getElementById('mataUangTujuan');
+
+            // Simpan pilihan saat ini agar tidak ter-reset saat update socket
+            const currentFrom = selectFrom.value;
+            const currentTo = selectTo.value;
+
+            // Reset dan isi ulang (IDR selalu ada)
+            let optionsHtml = '<option value="IDR">IDR (Rupiah)</option>';
+            
+            for (const kode of Object.keys(globalLatestRates)) {
+                optionsHtml += `<option value="${kode}">${kode}</option>`;
+            }
+
+            selectFrom.innerHTML = optionsHtml;
+            selectTo.innerHTML = optionsHtml;
+
+            // Set default value jika belum dipilih user
+            if(currentFrom) selectFrom.value = currentFrom;
+            if(!currentTo) selectTo.value = 'USD'; // Default target USD
+            else selectTo.value = currentTo;
+        }
+
+        function hitungHasil() {
+            const amount = parseFloat(document.getElementById('jumlah').value);
+            const from = document.getElementById('mataUangAsal').value;
+            const to = document.getElementById('mataUangTujuan').value;
+
+            if (isNaN(amount)) {
+                alert("Masukkan jumlah yang valid");
+                return;
+            }
+
+            // Logika: Data di rates adalah "Berapa Rupiah untuk 1 unit Asing"
+            // Contoh: USD = 15000 (Artinya 1 USD = Rp 15.000)
+            
+            let result = 0;
+            let rateFromToIDR = 1; // Base IDR
+            let rateToToIDR = 1;   // Base IDR
+
+            // 1. Dapatkan nilai Rupiah dari mata uang asal
+            if (from !== 'IDR') {
+                rateFromToIDR = globalLatestRates[from];
+            }
+
+            // 2. Dapatkan nilai Rupiah dari mata uang tujuan
+            if (to !== 'IDR') {
+                rateToToIDR = globalLatestRates[to];
+            }
+
+            // Rumus: (Jumlah * RateAsalKeIDR) / RateTujuanKeIDR
+            // Contoh 1: 10 USD ke IDR -> (10 * 15000) / 1 = 150.000
+            // Contoh 2: 15000 IDR ke USD -> (15000 * 1) / 15000 = 1
+            // Contoh 3: 1 USD ke SGD -> (1 * 15000) / 11000 = 1.36
+            
+            result = (amount * rateFromToIDR) / rateToToIDR;
+
+            // Format hasil
+            const resultFmt = new Intl.NumberFormat('id-ID', { 
+                maximumFractionDigits: 2,
+                minimumFractionDigits: 2
+            }).format(result);
+
+            document.getElementById('hasil').innerText = `Hasil: ${resultFmt} ${to}`;
+        }
     </script>
 </body>
+
 </html>
